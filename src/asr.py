@@ -308,7 +308,6 @@ class Listener(nn.Module):
             setattr(self, 'proj'+str(l),nn.Linear(rnn_out_dim,rnn_out_dim))
             input_dim = rnn_out_dim
 
-    
     def forward(self,input_x,enc_len):
         if self.vgg:
             input_x,enc_len = self.vgg_extractor(input_x,enc_len)
@@ -316,6 +315,7 @@ class Listener(nn.Module):
             input_x, _,enc_len = getattr(self,'layer'+str(l))(input_x,state_len=enc_len, pack_input=True)
             input_x = torch.tanh(getattr(self,'proj'+str(l))(input_x))
         return input_x,enc_len
+
 
 # Speller specified in the paper
 class Speller(nn.Module):
@@ -416,11 +416,11 @@ class Attention(nn.Module):
             self.state_mask = np.zeros((listener_feature.shape[0],listener_feature.shape[1]))
             for idx,sl in enumerate(state_len):
                 self.state_mask[idx,sl:] = 1
-            self.state_mask = torch.from_numpy(self.state_mask).type(torch.ByteTensor).to(decoder_state.device)
-            self.comp_listener_feature =  torch.tanh(self.psi(listener_feature)) if self.proj else listener_feature
+            self.state_mask = torch.from_numpy(self.state_mask).type(torch.BoolTensor).to(decoder_state.device)
+            self.comp_listener_feature = torch.tanh(self.psi(listener_feature)) if self.proj else listener_feature
 
         if self.proj:
-            comp_decoder_state =  torch.tanh(self.phi(decoder_state))
+            comp_decoder_state = torch.tanh(self.phi(decoder_state))
         else:
             comp_decoder_state = decoder_state
 
@@ -433,8 +433,10 @@ class Attention(nn.Module):
                 context = torch.bmm(attention_score[0].unsqueeze(1),listener_feature).squeeze(1)
                 #torch.sum(listener_feature*attention_score[0].unsqueeze(2).repeat(1,1,listener_feature.size(2)),dim=1)
             else:
-                attention_score =  [ self.softmax(torch.bmm(self.comp_listener_feature,att_querry.unsqueeze(2)).squeeze(dim=2))\
-                                    for att_querry in torch.split(comp_decoder_state, self.preprocess_mlp_dim, dim=-1)]
+                attention_score = [
+                    self.softmax(torch.bmm(self.comp_listener_feature,att_querry.unsqueeze(2)).squeeze(dim=2))
+                    for att_querry in torch.split(comp_decoder_state, self.preprocess_mlp_dim, dim=-1)
+                ]
                 for idx in range(self.num_head):
                     attention_score[idx].masked_fill_(self.state_mask,-float("inf"))
                     attention_score[idx] = self.softmax(attention_score[idx])
@@ -470,12 +472,15 @@ class RNNLayer(nn.Module):
         super(RNNLayer, self).__init__()
         self.sample_style = sample_style
         self.sample_rate = sample_rate
-        
-        self.layer = getattr(nn,rnn_cell.upper())(in_dim,out_dim, bidirectional=bidir, num_layers=layers,
-                               dropout=dropout_rate,batch_first=True)
-    
+
+        self.layer = getattr(nn,rnn_cell.upper())(
+            in_dim,out_dim, bidirectional=bidir, num_layers=layers,
+            dropout=dropout_rate,batch_first=True
+        )
+
     def forward(self,input_x,state=None,state_len=None, pack_input=False):
         # Forward RNN
+        # print("forward", state_len)
         if pack_input:
             assert state_len is not None, "Please specify seq len for pack_padded_sequence."
             input_x = pack_padded_sequence(input_x, state_len, batch_first=True)
@@ -488,7 +493,7 @@ class RNNLayer(nn.Module):
         if self.sample_rate > 1:
             batch_size,timestep,feature_dim = output.shape
 
-            if self.sample_style =='drop':
+            if self.sample_style == 'drop':
                 output = output[:,::self.sample_rate,:]
             elif self.sample_style == 'concat':
                 if timestep%self.sample_rate != 0: output = output[:,:-(timestep%self.sample_rate),:]
