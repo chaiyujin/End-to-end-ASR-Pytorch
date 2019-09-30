@@ -297,6 +297,9 @@ class Trainer(Solver):
                 torch.save(self.asr_model, os.path.join(self.ckpdir,'asr'))
                 if self.apply_clm:
                     torch.save(self.clm.clm,  os.path.join(self.ckpdir,'clm'))
+                # Save encoder
+                torch.save(self.asr_model.encoder.state_dict(), os.path.join(self.ckpdir, "best-encoder.ckpt"))
+                # TODO: save attention, speller
                 # Save hyps.
                 with open(os.path.join(self.ckpdir,'best_hyp.txt'),'w') as f:
                     for t1,t2 in zip(all_pred,all_true):
@@ -360,7 +363,12 @@ class Tester(Solver):
         self.verbose('Start decoding with beam search, beam size = '+str(self.config['solver']['decode_beam_size']))
         self.verbose('Number of utts to decode : {}, decoding with {} threads.'.format(len(self.test_set),self.njobs))
         # self.test_set = [(x,y) for (x,y) in self.test_set][::10]
-        _ = Parallel(n_jobs=self.njobs)(delayed(self.beam_decode)(x[0],y[0].tolist()[0]) for x,y in tqdm(self.test_set))
+        Parallel(n_jobs=self.njobs)(
+            delayed(self.beam_decode)(x[0],y[0].tolist()[0],x_len[0])
+            for x,y,x_len in tqdm(self.test_set)
+        )
+        # for x,y,x_len in tqdm(self.test_set):
+        #     self.beam_decode(x[0],y[0].tolist()[0],x_len[0])
 
         self.verbose('Decode done, best results at {}.'.format(str(os.path.join(self.ckpdir,self.decode_file+'.txt'))))
 
@@ -380,12 +388,10 @@ class Tester(Solver):
                 best_hyp = self.mapper.translate(hyp.outIndex,return_string=True)
                 f.write(gt+'\t'+best_hyp+'\n')
 
-    def beam_decode(self,x,y):
+    def beam_decode(self,x,y,state_len):
         '''Perform beam decoding with end-to-end ASR'''
         # Prepare data
         x = x.to(device = self.device,dtype=torch.float32)
-        state_len = torch.sum(torch.sum(x.cpu(),dim=-1) != 0,dim=-1)
-        state_len = [int(sl) for sl in state_len]
 
         # Forward
         with torch.no_grad():

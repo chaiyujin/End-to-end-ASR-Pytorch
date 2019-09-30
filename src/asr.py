@@ -24,7 +24,7 @@ class Seq2Seq(nn.Module):
                       *max(1,2*('Bi' in model_para['encoder']['enc_type']))\
                       *max(1,int(model_para['encoder']['sample_rate'].split('_')[-1])\
                            *('concat'== model_para['encoder']['sample_style']))
-        
+
         self.joint_ctc = model_para['optimizer']['joint_ctc']>0
         self.joint_att = model_para['optimizer']['joint_ctc']<1
 
@@ -42,7 +42,7 @@ class Seq2Seq(nn.Module):
 
         # CTC based Decoder
         if self.joint_ctc:
-            self.ctc_weight =  model_para['optimizer']['joint_ctc']
+            self.ctc_weight = model_para['optimizer']['joint_ctc']
             self.ctc_layer = nn.Linear(enc_out_dim,output_dim)
 
         self.init_parameters()
@@ -51,7 +51,7 @@ class Seq2Seq(nn.Module):
         # Load RNNLM (for inference only)
         self.rnn_lm = torch.load(decode_lm_path)
         self.rnn_lm.eval()
-    
+
     def clear_att(self):
         self.attention.reset_enc_mem()
 
@@ -72,22 +72,22 @@ class Seq2Seq(nn.Module):
         if self.joint_att:
             if teacher is not None:
                 teacher = self.embed(teacher)
-            
+
             # Init (init char = <SOS>, reset all rnn state and cell)
             self.decoder.init_rnn(encode_feature)
             self.attention.reset_enc_mem()
             last_char = self.embed(torch.zeros((bs),dtype=torch.long).to(next(self.decoder.parameters()).device))
             output_char_seq = []
             output_att_seq = [[]] * self.attention.num_head
-        
+
             # Decode
             for t in range(decode_step):
                 # Attend (inputs current state of first layer, encoded features)
                 attention_score,context = self.attention(self.decoder.state_list[0],encode_feature,encode_len)
-                # Spell (inputs context + embedded last character)                
+                # Spell (inputs context + embedded last character)
                 decoder_input = torch.cat([last_char,context],dim=-1)
                 dec_out = self.decoder(decoder_input)
-                
+
                 # To char
                 cur_char = self.char_trans(dec_out)
 
@@ -100,7 +100,6 @@ class Seq2Seq(nn.Module):
                         last_char = self.embed(sampled_char)
                 else:
                     last_char = self.embed(torch.argmax(cur_char,dim=-1))
-
 
                 output_char_seq.append(cur_char)
                 for head,a in enumerate(attention_score):
@@ -311,8 +310,11 @@ class Listener(nn.Module):
     def forward(self,input_x,enc_len):
         if self.vgg:
             input_x,enc_len = self.vgg_extractor(input_x,enc_len)
+        if enc_len is not None and enc_len.dim() == 2:
+            assert enc_len.shape[0] == 1
+            enc_len = enc_len.squeeze(0)
         for l in range(self.num_layers):
-            input_x, _,enc_len = getattr(self,'layer'+str(l))(input_x,state_len=enc_len, pack_input=True)
+            input_x, _, enc_len = getattr(self,'layer'+str(l))(input_x, state_len=enc_len, pack_input=True)
             input_x = torch.tanh(getattr(self,'proj'+str(l))(input_x))
         return input_x,enc_len
 
