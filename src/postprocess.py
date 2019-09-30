@@ -4,6 +4,7 @@ import torch
 import numpy as np
 import editdistance as ed
 
+
 class Mapper():
     '''Mapper for index2token'''
     def __init__(self,file_path):
@@ -16,7 +17,7 @@ class Mapper():
             self.unit = 'subword'
         elif '#' in symbols:
             self.unit = 'phone'
-        elif len(self.mapping)<50:
+        elif len(self.mapping) < 50:
             self.unit = 'char'
         else:
             self.unit = 'word'
@@ -28,7 +29,7 @@ class Mapper():
         new_seq = []
         for c in trim_eos(seq):
             new_seq.append(self.r_mapping[c])
-            
+
         if return_string:
             if self.unit == 'subword':
                 new_seq = ''.join(new_seq).replace('<sos>','').replace('<eos>','').replace('▁',' ').lstrip()
@@ -45,17 +46,17 @@ class Hypothesis:
     '''Hypothesis for beam search decoding.
        Stores the history of label sequence & score 
        Stores the previous decoder state, ctc state, ctc score, lm state and attention map (if necessary)'''
-    
+
     def __init__(self, decoder_state, emb, output_seq=[], output_scores=[], 
                  lm_state=None, ctc_state=None,ctc_prob=0.0,att_map=None):
         assert len(output_seq) == len(output_scores)
         # attention decoder
         self.decoder_state = decoder_state
         self.att_map = att_map
-        
+
         # RNN language model
         self.lm_state = lm_state
-        
+
         # Previous outputs
         self.output_seq = output_seq
         self.output_scores = output_scores
@@ -133,16 +134,22 @@ def cal_acc(pred,label):
     return sum(accs)/len(accs)
 
 def cal_cer(pred,label,mapper,get_sentence=False, argmax=True):
+    import itertools
     if argmax:
         pred = np.argmax(pred.cpu().detach(),axis=-1)
     label = label.cpu()
-    pred = [mapper.translate(p,return_string=True) for p in pred ]
+    pred = [mapper.translate(p,return_string=True) for p in pred]
     label = [mapper.translate(l,return_string=True) for l in label]
 
+    def merge_same(labels):
+        return " ".join([k for k, g in itertools.groupby(labels.split(), lambda x: x)])
+
+    pred = [merge_same(p) for p in pred]
+
     if get_sentence:
-        return pred,label
+        return pred, label
     eds = [float(ed.eval(p.split(' '),l.split(' ')))/len(l.split(' ')) for p,l in zip(pred,label)]
-    
+
     return sum(eds)/len(eds)
 
 # Only draw first attention head

@@ -12,7 +12,8 @@ import math
 from src.postprocess import Hypothesis
 from src.ctc import CTCPrefixScore
 
-CTC_BEAM_RATIO = 1.5 # DO NOT CHANGE THIS, MAY CAUSE OOM 
+
+CTC_BEAM_RATIO = 1.5  # DO NOT CHANGE THIS, MAY CAUSE OOM
 
 
 class Seq2Seq(nn.Module):
@@ -20,13 +21,15 @@ class Seq2Seq(nn.Module):
     def __init__(self, example_input, output_dim, model_para):
         super(Seq2Seq, self).__init__()
         # Construct Seq2Seq model
-        enc_out_dim = int(model_para['encoder']['dim'].split('_')[-1])\
-                      *max(1,2*('Bi' in model_para['encoder']['enc_type']))\
-                      *max(1,int(model_para['encoder']['sample_rate'].split('_')[-1])\
-                           *('concat'== model_para['encoder']['sample_style']))
+        enc_out_dim = (
+            int(model_para['encoder']['dim'].split('_')[-1])
+            * max(1, 2*('Bi' in model_para['encoder']['enc_type']))
+            * max(1, int(model_para['encoder']['sample_rate'].split('_')[-1])
+                  * ('concat' == model_para['encoder']['sample_style']))
+        )
 
-        self.joint_ctc = model_para['optimizer']['joint_ctc']>0
-        self.joint_att = model_para['optimizer']['joint_ctc']<1
+        self.joint_ctc = model_para['optimizer']['joint_ctc'] > 0.0
+        self.joint_att = model_para['optimizer']['joint_ctc'] < 1.0
 
         # Encoder
         self.encoder = Listener(example_input,**model_para['encoder'])
@@ -43,7 +46,10 @@ class Seq2Seq(nn.Module):
         # CTC based Decoder
         if self.joint_ctc:
             self.ctc_weight = model_para['optimizer']['joint_ctc']
-            self.ctc_layer = nn.Linear(enc_out_dim,output_dim)
+            self.ctc_layer = nn.Linear(enc_out_dim, output_dim)
+
+        self.encoded_dim = enc_out_dim
+        self.output_dim = output_dim
 
         self.init_parameters()
 
@@ -83,7 +89,7 @@ class Seq2Seq(nn.Module):
             # Decode
             for t in range(decode_step):
                 # Attend (inputs current state of first layer, encoded features)
-                attention_score,context = self.attention(self.decoder.state_list[0],encode_feature,encode_len)
+                attention_score,context = self.attention(self.decoder.state_list[0],encode_feature, encode_len)
                 # Spell (inputs context + embedded last character)
                 decoder_input = torch.cat([last_char,context],dim=-1)
                 dec_out = self.decoder(decoder_input)
@@ -150,19 +156,19 @@ class Seq2Seq(nn.Module):
             self.embed.weight.data.normal_(0, 1)
             for i in range(self.decoder.layer):
                 set_forget_bias_to_one(getattr(self.decoder,'layer'+str(i)).bias_ih)
-    
+
     def beam_decode(self, audio_feature, decode_step, state_len,decode_beam_size):
         '''beam decode returns top N hyps for each input sequence'''
+        assert not self.training
         assert audio_feature.shape[0] == 1
-        assert self.training == False
         self.decode_beam_size = decode_beam_size
         ctc_beam_size = int(CTC_BEAM_RATIO * self.decode_beam_size)
-        
+
         # Encode
         encode_feature,encode_len = self.encoder(audio_feature,state_len)
-        if decode_step==0:
+        if decode_step == 0:
             decode_step = int(encode_len[0])
-        
+
         # Init.
         cur_device = next(self.decoder.parameters()).device
         ctc_output = None
@@ -174,7 +180,6 @@ class Seq2Seq(nn.Module):
         att_maps = None
         lm_hidden = None
 
-
         # CTC based decoding
         if self.joint_ctc:
             ctc_output = F.log_softmax(self.ctc_layer(encode_feature),dim=-1)
@@ -185,22 +190,22 @@ class Seq2Seq(nn.Module):
         if self.joint_att:
             # Store attention map if location-aware
             store_att = self.attention.mode == 'loc'
-            
+
             # Init (init char = <SOS>, reset all rnn state and cell)
             self.decoder.init_rnn(encode_feature)
             self.attention.reset_enc_mem()
             last_char = self.embed(torch.zeros((1),dtype=torch.long).to(cur_device))
             last_char_idx = torch.LongTensor([[0]])
-            
+
             # beam search init
             final_outputs, prev_top_outputs, next_top_outputs = [], [], []
             prev_top_outputs.append(Hypothesis(self.decoder.hidden_state, self.embed, output_seq=[], output_scores=[], 
                                                lm_state=None, ctc_prob=0, ctc_state=ctc_state,
-                                               att_map = None)) # WIERD BUG here if all args. are not passed...
+                                               att_map = None))  # WIERD BUG here if all args. are not passed...
             # Decode
             for t in range(decode_step):
                 for prev_output in prev_top_outputs:
-                    
+
                     # Attention
                     self.decoder.hidden_state = prev_output.decoder_state
                     self.attention.prev_att = None if prev_output.att_map is None else prev_output.att_map.to(cur_device)
@@ -214,49 +219,48 @@ class Seq2Seq(nn.Module):
                         # TODO : Check the performance drop for computing part of candidates only
                         _, ctc_candidates = cur_char.topk(ctc_beam_size)
                         candidates = list(ctc_candidates[0].cpu().numpy())
-                        
+
                         #ctc_prob, ctc_state = ctc_prefix.full_compute(prev_output.outIndex,prev_output.ctc_state,candidates)
                         ctc_prob, ctc_state = ctc_prefix.cheap_compute(prev_output.outIndex,prev_output.ctc_state,candidates)
 
                         # TODO : study why ctc_char (slightly) > 0 sometimes
                         ctc_char = torch.FloatTensor(ctc_prob - prev_output.ctc_prob).to(cur_device)
-                        
+
                         # Combine CTC score and Attention score (focus on candidates)
                         hack_ctc_char = torch.zeros_like(cur_char).data.fill_(-1000000.0)
                         for idx,char in enumerate(candidates):
                             hack_ctc_char[0,char] = ctc_char[idx]
-                        cur_char = (1-self.ctc_weight)*cur_char + self.ctc_weight*hack_ctc_char#ctc_char#
-                        cur_char[0,0] = -10000000.0 # Hack to ignore <sos>
+                        cur_char = (1-self.ctc_weight)*cur_char + self.ctc_weight * hack_ctc_char  #ctc_char#
+                        cur_char[0,0] = -10000000.0  # Hack to ignore <sos>
 
                     # Joint RNN-LM decoding
-                    if self.decode_lm_weight>0:
+                    if self.decode_lm_weight > 0:
                         last_char_idx = prev_output.last_char_idx.to(cur_device)
                         lm_hidden, lm_output = self.rnn_lm(last_char_idx, [1], prev_output.lm_state)
                         cur_char += self.decode_lm_weight * F.log_softmax(lm_output.squeeze(1), dim=-1)
 
                     # Beam search
                     topv, topi = cur_char.topk(self.decode_beam_size)
-                    prev_att_map =  self.attention.prev_att.clone().detach().cpu() if store_att else None 
+                    prev_att_map = self.attention.prev_att.clone().detach().cpu() if store_att else None
                     final, top = prev_output.addTopk(topi, topv, self.decoder.hidden_state, att_map=prev_att_map,
                                                      lm_state=lm_hidden,ctc_state=ctc_state,ctc_prob=ctc_prob,
                                                      ctc_candidates=candidates)
                     # Move complete hyps. out
                     if final is not None:
                         final_outputs.append(final)
-                        if self.decode_beam_size ==1:
+                        if self.decode_beam_size == 1:
                             return final_outputs
                     next_top_outputs.extend(top)
-                
+
                 # Sort for top N beams
                 next_top_outputs.sort(key=lambda o: o.avgScore(), reverse=True)
                 prev_top_outputs = next_top_outputs[:self.decode_beam_size]
                 next_top_outputs = []
-            
+
             final_outputs += prev_top_outputs
             final_outputs.sort(key=lambda o: o.avgScore(), reverse=True)
-        
-        return final_outputs[:self.decode_beam_size]
 
+        return final_outputs[:self.decode_beam_size]
 
 
 # Listener (Encoder)
@@ -292,7 +296,6 @@ class Listener(nn.Module):
             sr = self.sample_rate[l]
             drop = self.dropout[l]
 
-            
             if "BiRNN" in enc_type:
                 setattr(self, 'layer'+str(l), RNNLayer(input_dim,out_dim, sr, rnn_cell=rnn_cell, dropout_rate=drop,
                                                        bidir=True,sample_style=sample_style))
@@ -317,6 +320,10 @@ class Listener(nn.Module):
             input_x, _, enc_len = getattr(self,'layer'+str(l))(input_x, state_len=enc_len, pack_input=True)
             input_x = torch.tanh(getattr(self,'proj'+str(l))(input_x))
         return input_x,enc_len
+
+    @property
+    def downsample_rate(self):
+        return np.prod(self.sample_rate)
 
 
 # Speller specified in the paper

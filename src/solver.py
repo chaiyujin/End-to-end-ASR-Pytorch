@@ -8,6 +8,7 @@ from tensorboardX import SummaryWriter
 from joblib import Parallel, delayed
 from tqdm import tqdm
 import torch.nn.functional as F
+import editdistance
 from src.asr import Seq2Seq
 from src.rnnlm import RNN_LM
 from src.clm import CLM_wrapper
@@ -59,7 +60,7 @@ class Trainer(Solver):
         self.logdir = os.path.join(paras.logdir,self.exp_name)
         self.log = SummaryWriter(self.logdir)
         self.valid_step = config['solver']['dev_step']
-        self.best_val_ed = 2.0
+        self.best_val_ed = float('inf')
 
         # Training details
         self.step = 0
@@ -120,11 +121,10 @@ class Trainer(Solver):
     def exec(self):
         ''' Training End-to-end ASR system'''
         self.verbose('Training set total '+str(len(self.train_set))+' batches.')
-
+        progress_bar = tqdm(range(self.max_step))
         while self.step < self.max_step:
             for x,y,state_len in self.train_set:
-                self.progress('Training step - '+str(self.step))
-
+                progress_bar.set_description("[training {}]".format(self.step))
                 # Perform teacher forcing rate decaying
                 tf_rate = self.tf_start - self.step*(self.tf_start-self.tf_end)/self.max_step
 
@@ -147,6 +147,13 @@ class Trainer(Solver):
                     state_len=state_len
                 )
 
+                # print()
+                # print("inp", x.shape[1] // self.asr_model.encoder.downsample_rate)
+                # print("ctc", ctc_pred.shape[1] if ctc_pred is not None else 0)
+                # print("att", att_pred.shape[1] if att_pred is not None else 0)
+                assert ctc_pred is not None, "for saber, must use ctc_pred!"
+                assert x.shape[1] // self.asr_model.encoder.downsample_rate == ctc_pred.shape[1]
+
                 # Calculate loss function
                 loss_log = {}
                 label = y[:,1:ans_len+1].contiguous()
@@ -165,14 +172,21 @@ class Trainer(Solver):
                 # CTC loss on CTC decoder
                 if self.ctc_weight > 0:
                     target_len = torch.sum(y != 0, dim=-1)
-                    ctc_loss = self.ctc_loss( F.log_softmax( ctc_pred.transpose(0,1),dim=-1), label, torch.LongTensor(state_len), target_len)
+                    ctc_loss = self.ctc_loss(
+                        F.log_softmax(ctc_pred.transpose(0,1), dim=-1), label,
+                        torch.LongTensor(state_len),                    target_len
+                    )
                     loss_log['train_ctc'] = ctc_loss
 
                 asr_loss = (1-self.ctc_weight)*att_loss+self.ctc_weight*ctc_loss
                 loss_log['train_full'] = asr_loss
 
                 # Adversarial loss from CLM
-                if self.apply_clm and att_pred.shape[1] >= CLM_MIN_SEQ_LEN:
+                if (
+                    self.apply_clm and
+                    (att_pred is not None) and
+                    (att_pred.shape[1] >= CLM_MIN_SEQ_LEN)
+                ):
                     if (self.step % self.clm.update_freq) == 0:
                         # update CLM once in a while
                         clm_log,gp = self.clm.train(att_pred.detach(),CLM_MIN_SEQ_LEN)
@@ -192,10 +206,14 @@ class Trainer(Solver):
                 # Logger
                 self.write_log('loss',loss_log)
                 if self.ctc_weight < 1:
-                    self.write_log('acc',{'train':cal_acc(att_pred,label)})
-                if self.step % TRAIN_WER_STEP == 0:
-                    self.write_log('error rate',
-                                   {'train':cal_cer(att_pred,label,mapper=self.mapper)})
+                    self.write_log('acc', {'train':cal_acc(att_pred,label)})
+                    if self.step % TRAIN_WER_STEP == 0:
+                        self.write_log('error rate', {'train':cal_cer(att_pred,label,mapper=self.mapper)})
+                else:
+                    # only ctc
+                    self.write_log('ctc acc', {'train':cal_acc(ctc_pred,label)})
+                    if self.step % TRAIN_WER_STEP == 0:
+                        self.write_log('ctc error rate', {'train':cal_cer(ctc_pred,label,mapper=self.mapper)})
 
                 # visualize inputs
                 if self.step % 1000 == 0:
@@ -209,6 +227,7 @@ class Trainer(Solver):
                     self.valid()
 
                 self.step += 1
+                progress_bar.update()
                 if self.step > self.max_step:break
 
     def write_log(self,val_name,val_dict):
@@ -227,11 +246,12 @@ class Trainer(Solver):
         # Init stats
         val_loss, val_ctc, val_att, val_acc, val_cer = 0.0, 0.0, 0.0, 0.0, 0.0
         val_len = 0
-        all_pred,all_true = [],[]
+        all_pred, all_true = [],[]
 
+        progress_bar = tqdm(self.dev_set, leave=False)
         # Perform validation
-        for cur_b,(x,y,state_len) in enumerate(self.dev_set):
-            self.progress(' '.join(['Valid step -',str(self.step),'(',str(cur_b),'/',str(len(self.dev_set)),')']))
+        for cur_b,(x,y,state_len) in enumerate(progress_bar):
+            progress_bar.set_description("[valid {}/{}]".format(self.step, cur_b, len(self.dev_set)))
 
             # Prepare data
             if len(x.shape) == 4: x = x.squeeze(0)
@@ -260,6 +280,13 @@ class Trainer(Solver):
                 all_true += t2
                 val_acc += cal_acc(att_pred,label)*int(x.shape[0])
                 val_cer += cal_cer(att_pred,label,mapper=self.mapper)*int(x.shape[0])
+            else:
+                # only ctc
+                t1,t2 = cal_cer(ctc_pred,label,mapper=self.mapper,get_sentence=True)
+                all_pred += t1
+                all_true += t2
+                val_acc += cal_acc(ctc_pred,label)*int(x.shape[0])
+                val_cer += cal_cer(ctc_pred,label,mapper=self.mapper)*int(x.shape[0])
 
             # Compute CTC loss
             if self.ctc_weight > 0:
@@ -277,6 +304,7 @@ class Trainer(Solver):
             if v > 0.0: loss_log[k] = v/val_len
         self.write_log('loss',loss_log)
 
+        # attention decoder
         if self.ctc_weight < 1:
             # Plot attention map to log
             val_hyp,val_txt = cal_cer(att_pred,label,mapper=self.mapper,get_sentence=True)
@@ -290,22 +318,44 @@ class Trainer(Solver):
                 self.write_log('hyp_'+str(idx),val_hyp[idx])
                 self.write_log('txt_'+str(idx),val_txt[idx])
 
-            # Save model by val er.
-            if val_cer/val_len  < self.best_val_ed:
-                self.best_val_ed = val_cer/val_len
-                self.verbose('Best val er       : {:.4f}       @ step {}'.format(self.best_val_ed,self.step))
-                torch.save(self.asr_model, os.path.join(self.ckpdir,'asr'))
-                if self.apply_clm:
-                    torch.save(self.clm.clm,  os.path.join(self.ckpdir,'clm'))
-                # Save encoder
-                torch.save(self.asr_model.encoder.state_dict(), os.path.join(self.ckpdir, "best-encoder.ckpt"))
-                # TODO: save attention, speller
-                # Save hyps.
-                with open(os.path.join(self.ckpdir,'best_hyp.txt'),'w') as f:
-                    for t1,t2 in zip(all_pred,all_true):
-                        f.write(t1+','+t2+'\n')
+        else:
+            # only use ctc
+            val_hyp, val_txt = cal_cer(ctc_pred, label,mapper=self.mapper,get_sentence=True)
+
+            # Record loss
+            self.write_log('ctc error rate',{'dev':val_cer/val_len})
+            self.write_log('ctc acc',{'dev':val_acc/val_len})
+            for idx in range(len(val_hyp)):
+                self.write_log('hyp_'+str(idx),val_hyp[idx])
+                self.write_log('txt_'+str(idx),val_txt[idx])
+
+        # Save model by val er.
+        self.maybe_dump_checkpoint(val_cer / val_len, all_pred, all_true)
 
         self.asr_model.train()
+
+    def maybe_dump_checkpoint(self, valid_val, all_pred, all_true):
+        if valid_val < self.best_val_ed:
+            self.best_val_ed = valid_val
+            self.verbose('Best val er       : {:.4f}       @ step {}'.format(self.best_val_ed,self.step))
+            torch.save(self.asr_model, os.path.join(self.ckpdir,'asr'))
+            if self.apply_clm:
+                torch.save(self.clm.clm,  os.path.join(self.ckpdir,'clm'))
+            # Save necessary encoder, ctc layer and dim information
+            saber_request = dict(
+                encoder=self.asr_model.encoder.state_dict(),
+                ctc_layer=self.asr_model.ctc_layer.state_dict() if hasattr(self.asr_model, "ctc_layer") else None,
+                encoded_dim=self.asr_model.encoded_dim,
+                output_dim=self.asr_model.output_dim,
+                downsample_rate=self.asr_model.encoder.downsample_rate
+            )
+            torch.save(saber_request, os.path.join(self.ckpdir, "best-for-saber.ckpt"))
+            # Save hyps.
+            with open(os.path.join(self.ckpdir,'best_hyp.csv'),'w') as f:
+                f.write("pred,true,edit_dist/true_len\n")
+                for t1,t2 in zip(all_pred, all_true):
+                    ed = editdistance.eval(t1.split(" "), t2.split(" "))
+                    f.write("{},{},{}/{}\n".format(t1, t2, ed, len(t2)))
 
 
 class Tester(Solver):
