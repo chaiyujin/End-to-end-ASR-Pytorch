@@ -280,10 +280,10 @@ class Listener(nn.Module):
         self.sample_style = sample_style
 
         # Parameters checking
-        assert len(self.sample_rate)==len(self.dropout), 'Number of layer mismatch'
-        assert len(self.dropout)==len(self.dims), 'Number of layer mismatch'
         self.num_layers = len(self.sample_rate)
-        assert self.num_layers>=1,'Listener should have at least 1 layer'
+        assert len(self.sample_rate) == len(self.dropout), 'Number of layer mismatch'
+        assert len(self.dropout) == len(self.dims), 'Number of layer mismatch'
+        assert self.num_layers >= 1, 'Listener should have at least 1 layer'
 
         # Construct Listener
         if 'VGG' in enc_type:
@@ -335,16 +335,17 @@ class Speller(nn.Module):
         self.layer = layer
         self.dim = dim
         self.dropout = nn.Dropout(p=dropout)
-        
+
         self.layer0 = getattr(nn,rnn_cell)(input_dim,dim)
         for i in range(1,layer):
             setattr(self,'layer'+str(i), getattr(nn,rnn_cell)(dim,dim))
-        
+
         self.state_list = []
         self.cell_list = []
-        
-        #self.layer = RNNLayer(input_dim,dim, 1, rnn_cell=rnn_cell, layers=layer,
-        #                                           dropout_rate=dropout, bidir=False)
+
+        # self.layer = RNNLayer(input_dim,dim, 1, rnn_cell=rnn_cell, layers=layer,
+        #                       dropout_rate=dropout, bidir=False)
+
     def init_rnn(self,context):
         self.state_list = [torch.zeros(context.shape[0],self.dim).to(context.device)]*self.layer
         self.cell_list = [torch.zeros(context.shape[0],self.dim).to(context.device)]*self.layer
@@ -354,18 +355,18 @@ class Speller(nn.Module):
         return [s.clone().detach().cpu() for s in self.state_list], [c.clone().detach().cpu() for c in self.cell_list]
 
     @hidden_state.setter
-    def hidden_state(self, state): # state is a tuple of two list
+    def hidden_state(self, state):
+        # state is a tuple of two list
         device = self.state_list[0].device
         self.state_list = [s.to(device) for s in state[0]]
         self.cell_list = [c.to(device) for c in state[1]]
-    
+
     def forward(self, input_context):
         self.state_list[0],self.cell_list[0] = self.layer0(self.dropout(input_context),(self.state_list[0],self.cell_list[0]))
         for l in range(1,self.layer):
             self.state_list[l],self.cell_list[l] = getattr(self,'layer'+str(l))(self.state_list[l-1],(self.dropout(self.state_list[l]),self.cell_list[l]))
-        
-        return self.state_list[-1]
 
+        return self.state_list[-1]
 
 
 # Attention mechanism
@@ -376,13 +377,11 @@ class Speller(nn.Module):
 # Output: Attention score                    with shape [batch size, T (attention score of each time step)]
 #         Context vector                     with shape [batch size, listener feature dimension]
 #         (i.e. weighted (by attention score) sum of all timesteps T's feature)
-
-class Attention(nn.Module):  
+class Attention(nn.Module):
     def __init__(self, in_dim, dec_dim, att_mode, dim, proj, num_head):
         super(Attention,self).__init__()
-
         self.mode = att_mode.lower()
-        
+
         self.num_head = num_head
         self.softmax = nn.Softmax(dim=-1)
 
@@ -400,7 +399,7 @@ class Attention(nn.Module):
         # Location-aware Attetion
         if self.mode == 'loc':
             assert self.proj,"Location-awared attetion requires proj==True"
-            assert self.num_head==1
+            assert self.num_head == 1
             # TODO : Move this to config
             C = 10
             K = 100
@@ -408,9 +407,9 @@ class Attention(nn.Module):
             self.loc_conv = nn.Conv1d(1, C, kernel_size=2*K+1, padding=K, bias=False)
             self.loc_proj = nn.Linear(C,dim,bias=False)
             self.gen_energy = nn.Linear(dim, 1)
-        
+
         self.comp_listener_feature = None
-    
+
     def reset_enc_mem(self):
         self.comp_listener_feature = None
         self.state_mask = None
@@ -437,10 +436,10 @@ class Attention(nn.Module):
             if self.num_head == 1:
                 energy = torch.bmm(self.comp_listener_feature,comp_decoder_state.unsqueeze(2)).squeeze(dim=2)
                 energy.masked_fill_(self.state_mask,-float("Inf"))
-                #torch.bmm(comp_decoder_state.unsqueeze(1),self.comp_listener_feature.transpose(1, 2)).squeeze(dim=1)*self.state_mask
+                # torch.bmm(comp_decoder_state.unsqueeze(1),self.comp_listener_feature.transpose(1, 2)).squeeze(dim=1)*self.state_mask
                 attention_score = [self.softmax(energy*scale)]
                 context = torch.bmm(attention_score[0].unsqueeze(1),listener_feature).squeeze(1)
-                #torch.sum(listener_feature*attention_score[0].unsqueeze(2).repeat(1,1,listener_feature.size(2)),dim=1)
+                # torch.sum(listener_feature*attention_score[0].unsqueeze(2).repeat(1,1,listener_feature.size(2)),dim=1)
             else:
                 attention_score = [
                     self.softmax(torch.bmm(self.comp_listener_feature,att_querry.unsqueeze(2)).squeeze(dim=2))
@@ -450,7 +449,7 @@ class Attention(nn.Module):
                     attention_score[idx].masked_fill_(self.state_mask,-float("inf"))
                     attention_score[idx] = self.softmax(attention_score[idx])
                 projected_src = [torch.bmm(att_s.unsqueeze(1),listener_feature).squeeze(1) \
-                                for att_s in attention_score]
+                                 for att_s in attention_score]
                 context = self.merge_head(torch.cat(projected_src,dim=-1))
         elif self.mode == 'loc':
             if self.prev_att is None:
@@ -462,7 +461,7 @@ class Attention(nn.Module):
 
             comp_decoder_state = comp_decoder_state.unsqueeze(1)
             comp_location_info = torch.tanh(self.loc_proj(self.loc_conv(self.prev_att).transpose(1,2)))
-            energy = self.gen_energy(torch.tanh(self.comp_listener_feature+ comp_decoder_state+comp_location_info)).squeeze(2)
+            energy = self.gen_energy(torch.tanh(self.comp_listener_feature + comp_decoder_state+comp_location_info)).squeeze(2)
             energy.masked_fill_(self.state_mask,-float("inf"))
             attention_score = [self.softmax(energy*scale)]
             self.prev_att = attention_score[0].unsqueeze(1)
@@ -470,7 +469,7 @@ class Attention(nn.Module):
         else:
             # TODO: other attention implementations
             raise ValueError('Unsupported Attention Mode: '+self.mode)
-        
+
         return attention_score,context
 
 
@@ -505,12 +504,17 @@ class RNNLayer(nn.Module):
             if self.sample_style == 'drop':
                 output = output[:,::self.sample_rate,:]
             elif self.sample_style == 'concat':
-                if timestep%self.sample_rate != 0: output = output[:,:-(timestep%self.sample_rate),:]
-                output = output.contiguous().view(batch_size,int(timestep/self.sample_rate),feature_dim*self.sample_rate)
+                if timestep % self.sample_rate != 0:
+                    output = output[:,:-(timestep % self.sample_rate),:]
+                output = output.contiguous().view(
+                    batch_size,
+                    int(timestep/self.sample_rate),
+                    feature_dim*self.sample_rate
+                )
             else:
                 raise ValueError('Unsupported Sample Style: '+self.sample_style)
-            if state_len is not None: state_len=[int(s/self.sample_rate) for s in state_len]
-
+            if state_len is not None:
+                state_len = [int(s/self.sample_rate) for s in state_len]
         if state_len is not None:
             return output,hidden,state_len
         return output,hidden
@@ -527,19 +531,19 @@ class VGGExtractor(nn.Module):
         self.freq_dim = freq_dim
         self.out_dim = out_dim
 
-        self.conv1 = nn.Conv2d(in_channel, 64, 3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(    64, 64, 3, stride=1, padding=1)
-        self.pool1 = nn.MaxPool2d(2, stride=2) # Half-time dimension
-        self.conv3 = nn.Conv2d(    64,128, 3, stride=1, padding=1)
-        self.conv4 = nn.Conv2d(   128,128, 3, stride=1, padding=1)
-        self.pool2 = nn.MaxPool2d(2, stride=2) # Half-time dimension
+        self.conv1 = nn.Conv2d(in_channel, 64,  3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(64,         64,  3, stride=1, padding=1)
+        self.pool1 = nn.MaxPool2d(2, stride=2)  # Half-time dimension
+        self.conv3 = nn.Conv2d(64,         128, 3, stride=1, padding=1)
+        self.conv4 = nn.Conv2d(128,        128, 3, stride=1, padding=1)
+        self.pool2 = nn.MaxPool2d(2, stride=2)  # Half-time dimension
 
     def check_dim(self,example_input):
         d = example_input.shape[-1]
-        if d%13 == 0:
+        if d % 13 == 0:
             # MFCC feature
             return int(d/13),13,(13//4)*128
-        elif d%40 == 0:
+        elif d % 40 == 0:
             # Fbank feature
             return int(d/40),40,(40//4)*128
         else:
@@ -548,8 +552,8 @@ class VGGExtractor(nn.Module):
     def view_input(self,feature,xlen):
         # drop time
         xlen = [x//4 for x in xlen]
-        if feature.shape[1]%4 != 0:
-            feature = feature[:,:-(feature.shape[1]%4),:].contiguous()
+        if feature.shape[1] % 4 != 0:
+            feature = feature[:,:-(feature.shape[1] % 4),:].contiguous()
         bs,ts,ds = feature.shape
         # reshape
         feature = feature.view(bs,ts,self.in_channel,self.freq_dim)
@@ -562,13 +566,12 @@ class VGGExtractor(nn.Module):
         feature,xlen = self.view_input(feature,xlen)
         feature = F.relu(self.conv1(feature))
         feature = F.relu(self.conv2(feature))
-        feature = self.pool1(feature) # BSx64xT/2xD/2
+        feature = self.pool1(feature)  # BSx64xT/2xD/2
         feature = F.relu(self.conv3(feature))
         feature = F.relu(self.conv4(feature))
-        feature = self.pool2(feature) # BSx128xT/4xD/4
+        feature = self.pool2(feature)  # BSx128xT/4xD/4
         # BSx128xT/4xD/4 -> BSxT/4x128xD/4
         feature = feature.transpose(1,2)
         #  BS x T/4 x 128 x D/4 -> BS x T/4 x 32D
         feature = feature.contiguous().view(feature.shape[0],feature.shape[1],self.out_dim)
         return feature,xlen
-

@@ -15,6 +15,7 @@ from src.clm import CLM_wrapper
 from src.dataset import LoadDataset
 from src.postprocess import Mapper,cal_acc,cal_cer,draw_att
 from src import visualizer
+from shutil import copyfile
 
 
 VAL_STEP = 30         # Additional Inference Timesteps to run during validation (to calculate CER)
@@ -37,6 +38,12 @@ class Solver():
         if not os.path.exists(paras.ckpdir):os.makedirs(paras.ckpdir)
         self.ckpdir = os.path.join(paras.ckpdir,self.exp_name)
         if not os.path.exists(self.ckpdir):os.makedirs(self.ckpdir)
+
+        # copy the config yaml file
+        copyfile(paras.config, os.path.join(self.ckpdir, "config.yaml"))
+        # copy the mapping file
+        copyfile(os.path.join(config['solver']['data_path'], "mapping.pkl"),
+                 os.path.join(self.ckpdir, "mapping.pkl"))
 
         # Load Mapper for idx2token
         self.mapper = Mapper(config['solver']['data_path'])
